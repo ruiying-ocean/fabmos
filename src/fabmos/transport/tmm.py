@@ -446,6 +446,12 @@ class Simulator(simulator.Simulator):
             self.wet_indices
         ]
 
+        # Index of the first wet point of each water column
+        nwet_per_column = (self.T.mask3d.values != 0).sum(axis=0).ravel()
+        self.column_starts = (nwet_per_column.cumsum() - nwet_per_column)[
+            nwet_per_column > 0
+        ]
+
         self.nwet = (self.T.mask3d.values != 0).sum()
         self.counts = np.empty(self.tiling.n, dtype=int)
         self.offsets = np.zeros_like(self.counts)
@@ -769,22 +775,30 @@ class Simulator(simulator.Simulator):
         The transport matrices are not monotone, so each transport step produces
         some negative concentrations. Clipping those without compensation would
         create mass.
+
+        Content is only preserved exactly for tracers that FABM clips at zero:
+        rescaling moves values clipped at any other bound out of range again.
+        FABM also clips surface- and bottom-attached state here, uncompensated.
         """
-        content = np.empty((2, len(self.tracers)))
-        content[0] = self.wet_volume @ self.local_tracers
+        volume = self.wet_volume[:, np.newaxis]
+        content = [np.add.reduceat(volume * self.local_tracers, self.column_starts)]
         self.fabm.model.check_state(True)
         for i, tracer in enumerate(self.tracers):
             self.local_tracers[:, i] = tracer.values.ravel()[self.wet_indices]
-        content[1] = self.wet_volume @ self.local_tracers
-        self.tiling.comm.Allreduce(MPI.IN_PLACE, content)
+        content.append(np.add.reduceat(volume * self.local_tracers, self.column_starts))
+
+        # Add up the content of all water columns in their global order. Unlike a
+        # reduction of subdomain totals, that does not depend on the decomposition.
+        columns = np.concatenate(self.tiling.comm.allgather(np.hstack(content)))
+        before, after = np.hsplit(columns.sum(axis=0), 2)
 
         # shortcut: a tracer without positive content stays as clipped (not conserved),
         # and compensation is global; make it column-local if nonlocal fluxes matter
         scale = np.divide(
-            content[0],
-            content[1],
-            out=np.ones_like(content[0]),
-            where=content.min(axis=0) > 0.0,
+            before,
+            after,
+            out=np.ones_like(before),
+            where=(before > 0.0) & (after > 0.0),
         )
         self.local_tracers *= scale
         for i, tracer in enumerate(self.tracers):

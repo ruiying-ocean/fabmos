@@ -8,10 +8,14 @@ Usage: [mpiexec -n <N>] python tmm_conservation.py <path to TMM setup> [--days D
 
 With --no-repair (serial only), check instead that nothing is repaired silently:
 the simulation must then stop at the first invalid value.
+
+The tracers are saved to output.nc. To check that they do not depend on the subdomain
+decomposition, compare that file between runs with different numbers of cores:
+pygetm-test-scaling --nmax 2 --compare output.nc tmm_conservation.py <path to TMM setup>
 """
 
 import argparse
-import logging
+import datetime
 import sys
 
 import cftime
@@ -46,9 +50,7 @@ parser.add_argument("--no-repair", action="store_true", help="switch off repair"
 args = parser.parse_args()
 
 domain = fabmos.transport.tmm.create_domain(args.path)
-sim = fabmos.transport.tmm.Simulator(
-    domain, calendar=CALENDAR, fabm=FABM_CONFIG, log_level=logging.WARNING
-)
+sim = fabmos.transport.tmm.Simulator(domain, calendar=CALENDAR, fabm=FABM_CONFIG)
 
 lon = sim.T.lon.values % 360.0
 lat = sim.T.lat.values
@@ -72,11 +74,17 @@ def content_and_minimum(name: str) -> tuple[float, float]:
 names = [tracer.name for tracer in sim.tracers]
 initial = {name: content_and_minimum(name) for name in names}
 
+out = sim.output_manager.add_netcdf_file(
+    "output.nc", interval=datetime.timedelta(days=1), save_initial=False
+)
+out.request(*names)
+
 # Two biogeochemical steps per transport step, so that both kinds of step are covered
 sim.start(
     cftime.datetime(2000, 1, 1, calendar=CALENDAR),
     timestep=0.5 * domain._delta_t,
     transport_timestep=domain._delta_t,
+    report=datetime.timedelta(days=args.days),
 )
 
 # Without negative values after transport, this check would not test anything
@@ -95,6 +103,7 @@ except Exception as e:
     print(f"OK: without repair, the simulation stops: {e}")
     sys.exit(0)
 assert not args.no_repair, "Repair is off, yet negative values went unnoticed."
+sim.finish()
 
 final = {name: content_and_minimum(name) for name in names}
 for name in names:
