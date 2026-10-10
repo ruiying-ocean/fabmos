@@ -200,6 +200,15 @@ class Simulator(pygetm.simulation.BaseSimulation):
     def transport(self, timestep: float):
         pass
 
+    def state_changed(self):
+        """Bring forcing and diagnostics in line with a model state that was changed
+        from outside, for instance by :func:`fabmos.spinup.spin_up`.
+
+        This recalculates the biogeochemical source terms. If FABM's repair is on,
+        it also clips state variables to their valid range.
+        """
+        self._update_forcing_and_diagnostics(macro_active=True)
+
     @property
     def totals(
         self,

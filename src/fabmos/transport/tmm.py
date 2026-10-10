@@ -695,6 +695,17 @@ class Simulator(simulator.Simulator):
                 f"every {info[-1]} steps."
             )
 
+    def state_changed(self):
+        # The compressed tracer state must equal the FABM state, as transport() takes
+        # any difference between the two for a change due to biogeochemistry.
+        self.gather_req.Wait()
+        for i, tracer in enumerate(self.tracers):
+            self.local_tracers[:, i] = tracer.values.ravel()[self.wet_indices]
+        if self.fabm.repair:
+            self._repair_tracers()
+        self.gather_req = self.gather_tracer()
+        super().state_changed()
+
     def advance_fabm(self, timestep: float):
         for source, target, cum_source, w, _, freq in self._redistribute:
             cum_source.all_values += source.all_values
