@@ -16,9 +16,13 @@ Usage, after ``sim.start(...)``::
 from typing import Optional
 
 import numpy as np
+import pygetm
 
 from .anderson import AndersonAccelerator
 from .simulator import Simulator
+
+# Calendars in which all years have the same number of days
+FIXED_YEAR_CALENDARS = ("360_day", "noleap", "365_day", "all_leap", "366_day")
 
 
 def spin_up(
@@ -33,9 +37,10 @@ def spin_up(
 
     The state consists of all fields that would be saved in a restart file. The
     simulation must have been started, and its forcing must have a period of
-    ``nstep`` time steps (or be constant). Time keeps increasing: each iteration
-    advances the simulation by ``nstep`` time steps, and all configured output is
-    written as usual.
+    ``nstep`` time steps (or be constant). Forcing that repeats every year only has
+    such a period in a calendar in which all years are equally long, such as
+    ``360_day`` or ``noleap``. Time keeps increasing: each iteration advances the
+    simulation by ``nstep`` time steps, and all configured output is written as usual.
 
     Args:
         sim: the simulation
@@ -58,6 +63,28 @@ def spin_up(
             f"A period of {nstep} time steps does not consist of a whole number of"
             f" transport steps, which take {sim.split_factor} time step(s) each."
         )
+    # Created on every rank, though only the first uses it, so that invalid settings
+    # are refused by all ranks alike.
+    accelerator = AndersonAccelerator(m, beta)
+    if sim.tiling.rank == 0 and sim.time.calendar not in FIXED_YEAR_CALENDARS:
+        sim.logger.warning(
+            f"In the {sim.time.calendar} calendar, years differ in length. Forcing"
+            " that repeats every year then does not repeat after a fixed number of"
+            " time steps, which keeps the spin-up from converging."
+        )
+    return _iterate(sim, nstep, tolerance, max_iterations, accelerator)
+
+
+@pygetm.simulation.log_exceptions
+def _iterate(
+    sim: Simulator,
+    nstep: int,
+    tolerance: float,
+    max_iterations: int,
+    accelerator: AndersonAccelerator,
+) -> tuple[int, float]:
+    # log_exceptions stops all ranks if any of them fails. Otherwise the others
+    # would wait forever in the next gather or scatter.
     comm = sim.tiling.comm
     root = comm.rank == 0
     fields = [
@@ -95,7 +122,6 @@ def spin_up(
             field.scatter(values)
         sim.state_changed()
 
-    accelerator = AndersonAccelerator(m, beta) if root else None
     x = get_state()
     for iteration in range(1, max_iterations + 1):
         for _ in range(nstep):

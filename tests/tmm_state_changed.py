@@ -4,6 +4,13 @@ After Simulator.state_changed(), the simulation must continue from the new state
 if it had been reached by time stepping.
 
 Usage: [mpiexec -n <N>] python tmm_state_changed.py <path to TMM setup>
+
+With --invalid-on-last-rank, check instead that with repair off, an invalid state on
+a single rank stops the whole run at once. A parallel run must then end within
+seconds with "MPI_ABORT was invoked" and a non-zero exit code, and the log of the
+last rank (getm-000N.log) must contain "FABM state contains invalid values". A
+serial run must end with that error. The check has failed if the run ends in any
+other way, or does not end at all.
 """
 
 import argparse
@@ -32,6 +39,9 @@ FABM_CONFIG = dict(
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("path", help="the path to the original TMM data")
+parser.add_argument(
+    "--invalid-on-last-rank", action="store_true", help="check that errors stop the run"
+)
 args = parser.parse_args()
 
 domain = fabmos.transport.tmm.create_domain(args.path)
@@ -60,6 +70,14 @@ sim.start(
 )
 for _ in range(10):
     sim.advance()
+
+if args.invalid_on_last_rank:
+    sim.fabm.repair = False
+    if comm.rank == comm.size - 1:
+        sim["negative_c"].values[wet] = -1.0
+    sim.state_changed()
+    comm.Barrier()
+    raise AssertionError("An invalid state went unnoticed")
 
 sim["b_c"].values[wet] *= 2.0
 sim["negative_c"].values[wet & far_north] = -1.0

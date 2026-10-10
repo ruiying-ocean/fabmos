@@ -200,6 +200,7 @@ class Simulator(pygetm.simulation.BaseSimulation):
     def transport(self, timestep: float):
         pass
 
+    @pygetm.simulation.log_exceptions
     def state_changed(self):
         """Bring forcing and diagnostics in line with a model state that was changed
         from outside, for instance by :func:`fabmos.spinup.spin_up`.

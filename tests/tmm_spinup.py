@@ -4,10 +4,14 @@ A tracer is supplied at the sea surface at a constant rate and decays everywhere
 Whatever the circulation, its global content must end up at supply / decay rate.
 
 Usage: [mpiexec -n <N>] python tmm_spinup.py <path to TMM setup>
+
+With --calendar set to a calendar with leap years, such as "standard", check instead
+that the spin-up warns that yearly forcing then has no fixed period.
 """
 
 import argparse
 import logging
+import sys
 
 import cftime
 import numpy as np
@@ -45,13 +49,29 @@ FABM_CONFIG = dict(
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("path", help="the path to the original TMM data")
+parser.add_argument("--calendar", default=CALENDAR, help="calendar of the simulation")
 args = parser.parse_args()
 
 domain = fabmos.transport.tmm.create_domain(args.path)
 sim = fabmos.transport.tmm.Simulator(
-    domain, calendar=CALENDAR, fabm=FABM_CONFIG, log_level=logging.WARNING
+    domain, calendar=args.calendar, fabm=FABM_CONFIG, log_level=logging.WARNING
 )
 comm = sim.tiling.comm
+
+
+class Recorder(logging.Handler):
+    """Keeps the warnings that the simulation logs."""
+
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.messages = []
+
+    def emit(self, record: logging.LogRecord):
+        self.messages.append(record.getMessage())
+
+
+recorder = Recorder()
+sim.logger.addHandler(recorder)
 
 # The virtual tracer flux due to precipitation - evaporation changes tracer content.
 # Switch it off, so that the equilibrium content is known exactly.
@@ -76,13 +96,24 @@ def content() -> float:
 
 # Two biogeochemical steps per transport step
 sim.start(
-    cftime.datetime(2000, 1, 1, calendar=CALENDAR),
+    cftime.datetime(2000, 1, 1, calendar=args.calendar),
     timestep=0.5 * domain._delta_t,
     transport_timestep=domain._delta_t,
     report=0,
     report_totals=0,
 )
 nstep = int(round(YEAR / sim.timestep))
+
+if args.calendar != CALENDAR:
+    # With years of unequal length, forcing that repeats every year has no period of
+    # a fixed number of time steps. spin_up cannot tell what the forcing is like,
+    # but it must warn.
+    fabmos.spinup.spin_up(sim, nstep, TOLERANCE, max_iterations=1)
+    warned = any("calendar" in message for message in recorder.messages)
+    assert warned or comm.rank != 0, "No warning about the calendar"
+    if comm.rank == 0:
+        print(f"OK: spin-up warns about the {args.calendar} calendar")
+    sys.exit(0)
 
 # Masked points hold FABM's missing value from here on
 masked_before = sim["tracer_c"].values[~wet].copy()
@@ -94,6 +125,15 @@ except ValueError:
     pass
 else:
     raise AssertionError("A period of an odd number of time steps was accepted")
+
+# Invalid settings must be refused on every rank, not only on the first, which does
+# the arithmetic: the other ranks would wait for it forever
+try:
+    fabmos.spinup.spin_up(sim, nstep, TOLERANCE, MAX_ITERATIONS, beta=0.0)
+except ValueError:
+    pass
+else:
+    raise AssertionError("beta=0 was accepted")
 
 # Too few iterations: no convergence, but the simulation remains usable
 initial_error = content() / expected_content - 1.0
@@ -121,5 +161,9 @@ unchanged = (extra.values == 3.0).all() and np.array_equal(
     sim["tracer_c"].values[~wet], masked_before
 )
 assert comm.allreduce(unchanged, op=MPI.LAND), "Extra state or masked points changed"
+
+# In a calendar with years of equal length, there is nothing to warn about
+false_alarm = any("calendar" in message for message in recorder.messages)
+assert not false_alarm, "Warning about the calendar, though all years are equally long"
 if comm.rank == 0:
     print(f"OK: accelerated spin-up reached the equilibrium on {comm.size} rank(s)")

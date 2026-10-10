@@ -695,6 +695,7 @@ class Simulator(simulator.Simulator):
                 f"every {info[-1]} steps."
             )
 
+    @pygetm.simulation.log_exceptions
     def state_changed(self):
         # The compressed tracer state must equal the FABM state, as transport() takes
         # any difference between the two for a change due to biogeochemistry.
