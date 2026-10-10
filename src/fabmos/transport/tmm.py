@@ -441,6 +441,11 @@ class Simulator(simulator.Simulator):
         weti, wetk = self.T.mask3d.values[:, 0, :].T.nonzero()
         self.wet_indices = (wetk * self.T.nx + weti).astype(np.intp)
 
+        # Volume of each wet point, used to preserve tracer content during repair
+        self.wet_volume = (self.T.hn.values * self.T.area.values).ravel()[
+            self.wet_indices
+        ]
+
         self.nwet = (self.T.mask3d.values != 0).sum()
         self.counts = np.empty(self.tiling.n, dtype=int)
         self.offsets = np.zeros_like(self.counts)
@@ -747,10 +752,41 @@ class Simulator(simulator.Simulator):
         # Do the implicit step
         self.local_tracers[:, :] = self.Aimp @ new_local_tracers
 
+        # Copy the updated compressed state back to the uncompressed state
+        for i, tracer in enumerate(self.tracers):
+            tracer.values.ravel()[self.wet_indices] = self.local_tracers[:, i]
+
+        if self.fabm.repair:
+            self._repair_tracers()
+
         # Start synchronizing the compressed tracer state across subdomains
         self.gather_req = self.gather_tracer()
 
-        # Copy the updated compressed state back to the uncompressed state
+    def _repair_tracers(self):
+        """Let FABM clip invalid tracer values, then rescale each tracer to
+        preserve its global content, as NEMO's trc_rad does.
+
+        The transport matrices are not monotone, so each transport step produces
+        some negative concentrations. Clipping those without compensation would
+        create mass.
+        """
+        content = np.empty((2, len(self.tracers)))
+        content[0] = self.wet_volume @ self.local_tracers
+        self.fabm.model.check_state(True)
+        for i, tracer in enumerate(self.tracers):
+            self.local_tracers[:, i] = tracer.values.ravel()[self.wet_indices]
+        content[1] = self.wet_volume @ self.local_tracers
+        self.tiling.comm.Allreduce(MPI.IN_PLACE, content)
+
+        # shortcut: a tracer without positive content stays as clipped (not conserved),
+        # and compensation is global; make it column-local if nonlocal fluxes matter
+        scale = np.divide(
+            content[0],
+            content[1],
+            out=np.ones_like(content[0]),
+            where=content.min(axis=0) > 0.0,
+        )
+        self.local_tracers *= scale
         for i, tracer in enumerate(self.tracers):
             tracer.values.ravel()[self.wet_indices] = self.local_tracers[:, i]
 
