@@ -159,6 +159,18 @@ class Simulator(pygetm.simulation.BaseSimulation):
                 f"Virtual flux due to net freshwater flux will be applied to"
                 f" {', '.join([t.name for t in self.tracers_with_virtual_flux])}"
             )
+            # Surface weights before and after dilution, plus the surface layer of
+            # every tracer, gathered on the root rank in one go per time step
+            n = len(self.tracers_with_virtual_flux) + 2
+            self._vf_fields = np.empty((n,) + self.T.area.values.shape)
+            self._vf_gather, _, _ = self.T.get_gather_info(
+                (n,) + self.T.area.all_values.shape, False, float, 0.0
+            )
+            self._vf_where = True
+            self._vf_unmasked = None
+            if self.unmasked2d is not None:
+                self._vf_where = self.unmasked2d.values
+                self._vf_unmasked = self.unmasked2d.gather()
         else:
             self.logger.info("Virtual tracer flux due to net freshwater flux not used")
 
@@ -189,10 +201,39 @@ class Simulator(pygetm.simulation.BaseSimulation):
 
     def advance_fabm(self, timestep: float):
         if self.tracers_with_virtual_flux:
-            # Add virtual flux due to precipitation - evaporation
-            scale = 1.0 - timestep * self.pe.values / self.T.hn.values[0, ...]
-            for tracer in self.tracers_with_virtual_flux:
-                tracer.values[0, :, :] *= scale
+            # Dilute/concentrate the surface layer by precipitation - evaporation.
+            # Its thickness is fixed, so this alone would change global tracer
+            # content by -dt * sum(pe * area * C). Rescale the layer to conserve it.
+            # The sums run over the gathered global fields on the root rank, so that
+            # the result does not depend on the subdomain decomposition. Masked points
+            # are left alone: they hold missing values.
+            h_sf = self.T.hn.values[0, ...]
+            scale = np.divide(
+                self.pe.values, h_sf, out=np.zeros_like(h_sf), where=self._vf_where
+            )
+            scale *= -timestep
+            scale += 1.0
+            fields = self._vf_fields
+            np.multiply(h_sf, self.T.area.values, out=fields[0])
+            np.multiply(fields[0], scale, out=fields[1])
+            for i, tracer in enumerate(self.tracers_with_virtual_flux):
+                fields[i + 2] = tracer.values[0, ...]
+            glob = self._vf_gather(fields)
+            ratios = None
+            if glob is not None:
+                if self._vf_unmasked is None:
+                    glob = glob.reshape(glob.shape[0], -1)
+                else:
+                    glob = glob[:, self._vf_unmasked]
+                before = (glob[2:] * glob[0]).sum(axis=1)
+                after = (glob[2:] * glob[1]).sum(axis=1)
+                ratios = np.divide(
+                    before, after, out=np.ones_like(before), where=after > 0.0
+                )
+            ratios = self.tiling.comm.bcast(ratios)
+            for tracer, ratio in zip(self.tracers_with_virtual_flux, ratios):
+                surface = tracer.values[0, ...]
+                np.multiply(surface, scale * ratio, out=surface, where=self._vf_where)
 
         if self.fabm:
             self.fabm.advance(timestep)

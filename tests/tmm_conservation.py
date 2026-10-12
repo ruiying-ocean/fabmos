@@ -2,7 +2,9 @@
 
 Transport matrices are not monotone: transporting a field with sharp gradients
 produces negative concentrations, which FABM's repair clips to zero. That clip must
-not change the global content of any tracer.
+not change the global content of any tracer. The virtual tracer flux due to
+precipitation - evaporation stays on, so its rescale of the surface layer is checked
+too.
 
 Usage: [mpiexec -n <N>] python tmm_conservation.py <path to TMM setup> [--days DAYS]
 
@@ -57,10 +59,6 @@ lat = sim.T.lat.values
 sim["box_c"].fill((lon >= 300.0) & (lon <= 330.0) & (lat >= 30.0) & (lat <= 55.0))
 sim["empty_c"].fill(0.0)
 sim.fabm.repair = not args.no_repair
-
-# The virtual tracer flux due to precipitation - evaporation changes tracer content
-# by design. Switch it off to isolate the effect of transport and repair.
-sim.use_virtual_flux = False
 
 comm = sim.tiling.comm
 volume = (sim.T.hn.values * sim.T.area.values).ravel()[sim.wet_indices]

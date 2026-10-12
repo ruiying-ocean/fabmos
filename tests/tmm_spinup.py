@@ -73,10 +73,6 @@ class Recorder(logging.Handler):
 recorder = Recorder()
 sim.logger.addHandler(recorder)
 
-# The virtual tracer flux due to precipitation - evaporation changes tracer content.
-# Switch it off, so that the equilibrium content is known exactly.
-sim.use_virtual_flux = False
-
 # A 2D field that is part of the model state, like the bottom-attached state
 # variables of some biogeochemical models. Nothing changes it.
 extra = sim.T.array(
@@ -86,7 +82,7 @@ extra.fill(3.0)
 
 wet = sim.T.mask3d.values != 0
 volume = (sim.T.hn.values * sim.T.area.values)[wet]
-total_area = comm.allreduce(sim.T.area.values.sum())
+total_area = comm.allreduce(sim.T.area.values[sim.T.mask.values != 0].sum())
 expected_content = SURFACE_FLUX * total_area / DECAY_RATE
 
 
